@@ -9,8 +9,11 @@ def bubble_sort(arr):
     return arr
 
 parser = argparse.ArgumentParser()
-parser.add_argument("numbers", nargs="+", type=float)
+parser.add_argument("numbers", nargs="+", type=int)
 args = parser.parse_args()
 
 print("Исходный список:", args.numbers)
 print("Отсортированный список:", bubble_sort(args.numbers))
+
+##python3 bubble_sort.py 5 2 9 1 3
+

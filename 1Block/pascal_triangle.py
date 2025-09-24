@@ -21,3 +21,5 @@ parser.add_argument("rows", type=int,)
 args = parser.parse_args()
 
 pascal(args.rows)
+
+## python3 pascal_triangle.py 5
