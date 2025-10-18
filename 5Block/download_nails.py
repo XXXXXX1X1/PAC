@@ -1,6 +1,9 @@
+import os
+os.environ["KAGGLEHUB_CACHE"] = os.getcwd()
+
 import kagglehub
 
-# Download latest version
 path = kagglehub.dataset_download("vpapenko/nails-segmentation")
 
-print("Path to dataset files:", path)
+
+print("Файлы скачаны в:", path)
