@@ -84,43 +84,19 @@ def show_pairs_viewer(pairs):
             i = (i + 1) % len(pairs)
     cv2.destroyWindow(win)
 
-# ----------------------- видео -----------------------
-
-def play_video_gray(video_path):
-    if not os.path.isfile(video_path):
-        print(f"Видео '{video_path}' не найдено.")
-        return
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        print(f"Не удалось открыть видео: {video_path}")
-        return
-    win = f"Video (grayscale): {os.path.basename(video_path)}"
-    cv2.namedWindow(win, cv2.WINDOW_NORMAL)
-    print("Проигрывание видео. Q/Esc — выход.")
-    while True:
-        ok, frame = cap.read()
-        if not ok:
-            break
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        cv2.imshow(win, gray)
-        if cv2.waitKey(25) & 0xFF in (27, ord('q'), ord('Q')):
-            break
-    cap.release()
-    cv2.destroyWindow(win)
 
 # ----------------------- main -----------------------
 
 def main():
     args = parse_args()
-    if args.video:  # показываем только видео
-        play_video_gray(args.video_path)
-    else:           # показываем только ногти
-        images_dir, labels_dir = find_image_label_dirs()
-        pairs = collect_pairs(images_dir, labels_dir)
-        if not pairs:
-            print("Пар не найдено.")
-        else:
-            show_pairs_viewer(pairs)
+
+             # показываем только ногти
+    images_dir, labels_dir = find_image_label_dirs()
+    pairs = collect_pairs(images_dir, labels_dir)
+    if not pairs:
+        print("Пар не найдено.")
+    else:
+        show_pairs_viewer(pairs)
 
 if __name__ == "__main__":
     main()

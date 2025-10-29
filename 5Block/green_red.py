@@ -1,79 +1,116 @@
-import os
 import cv2
 import numpy as np
+import time
 
-# --- Чёткий путь к данным ---
-BASE_DIR = os.path.join("datasets", "vpapenko", "nails-segmentation", "versions", "1")
-IMAGES_DIR = os.path.join(BASE_DIR, "images")
-MASKS_DIR = os.path.join(BASE_DIR, "labels")
+VIDEO_SOURCE = 0      # 0 = webcam,
+RED_SEC   = 3.0       # detection ON
+GREEN_SEC = 3.0       # detection OFF
 
-IMG_EXTS = {".jpg", ".jpeg", ".png"}
-MSK_EXTS = {".png", ".jpg", ".jpeg"}
+BLUR_K = (7, 7)
+DIFF_THR = 25
+KERNEL = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
 
-def list_files_by_stem(folder, allowed_exts):
-    files = {}
-    for name in os.listdir(folder):
-        ext = os.path.splitext(name)[1].lower()
-        if ext in allowed_exts:
-            stem = os.path.splitext(name)[0]
-            files[stem] = os.path.join(folder, name)
-    return files
+FLOW = dict(pyr_scale=0.5, levels=3, winsize=15,
+            iterations=3, poly_n=5, poly_sigma=1.2, flags=0)
 
-def make_pairs(images_dir, masks_dir):
-    imgs = list_files_by_stem(images_dir, IMG_EXTS)
-    msks = list_files_by_stem(masks_dir, MSK_EXTS)
-    common = sorted(set(imgs.keys()) & set(msks.keys()))
-    return [(imgs[k], msks[k]) for k in common]
+def open_capture(src):
+    cap = cv2.VideoCapture(src)
+    if not cap.isOpened():
+        raise RuntimeError(f"Cannot open video source: {src}")
+    return cap
 
-def load_and_draw(img_path, mask_path):
-    img = cv2.imread(img_path)
-    mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+def to_gray(frame):
+    return cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-    if img is None or mask is None:
-        raise FileNotFoundError("Не удалось загрузить одно из изображений.")
+def motion_mask_diff(prev_gray, gray):
+    # Basic: |curr - prev| -> threshold -> de-noise
+    g1 = cv2.GaussianBlur(prev_gray, BLUR_K, 0)
+    g2 = cv2.GaussianBlur(gray,     BLUR_K, 0)
+    diff = cv2.absdiff(g1, g2)
+    _, m = cv2.threshold(diff, DIFF_THR, 255, cv2.THRESH_BINARY)
+    m = cv2.morphologyEx(m, cv2.MORPH_OPEN, KERNEL, iterations=1)
+    return m
 
-    if img.shape[:2] != mask.shape[:2]:
-        mask = cv2.resize(mask, (img.shape[1], img.shape[0]), interpolation=cv2.INTER_NEAREST)
+def motion_mask_flow(prev_gray, gray):
+    # Robust: optical flow magnitude -> threshold
+    flow = cv2.calcOpticalFlowFarneback(prev_gray, gray, None, **FLOW)
+    mag, _ = cv2.cartToPolar(flow[...,0], flow[...,1], angleInDegrees=False)
+    m = (mag > 1.5).astype(np.uint8) * 255
+    m = cv2.morphologyEx(m, cv2.MORPH_OPEN, KERNEL, iterations=1)
+    return m
 
-    # Бинаризация
-    _, bin_mask = cv2.threshold(mask, 0, 255, cv2.THRESH_BINARY)
-
-    # Морфологическая очистка от одиночных пикселей
-    kernel = np.ones((5, 5), np.uint8)
-    bin_mask = cv2.morphologyEx(bin_mask, cv2.MORPH_OPEN, kernel)   # удаляет мелкие шумы
-    bin_mask = cv2.morphologyEx(bin_mask, cv2.MORPH_CLOSE, kernel)  # заполняет мелкие дырки
-
-    # Поиск контуров
-    contours, _ = cv2.findContours(bin_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    # Рисуем контуры на копии изображения
-    vis = img.copy()
-    cv2.drawContours(vis, contours, -1, (0, 255, 0), 2)
-    return np.hstack([img, cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR), vis])
-
+def two_color_map(mask, shape_hw):
+    # Red where motion, green elsewhere
+    h, w = shape_hw
+    if mask.shape != (h, w):
+        mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
+    out = np.zeros((h, w, 3), dtype=np.uint8)
+    out[:] = (0, 255, 0)
+    out[mask > 0] = (0, 0, 255)
+    return out
 
 def main():
-    pairs = make_pairs(IMAGES_DIR, MASKS_DIR)
-    if not pairs:
-        print("Пар не найдено.")
-        return
+    cap = open_capture(VIDEO_SOURCE)
+    use_flow = False               # False=Diff, True=Flow
+    phase = None
+    next_switch = time.time() + GREEN_SEC
+    prev_gray = None
 
-    idx = 0
-    cv2.namedWindow("Nails Segmentation Viewer", cv2.WINDOW_NORMAL)
+    win_cam = "Camera"
+    win_map = "Motion Map"
+    cv2.namedWindow(win_cam, cv2.WINDOW_NORMAL)
+    cv2.namedWindow(win_map, cv2.WINDOW_NORMAL)
+
 
     while True:
-        img_path, mask_path = pairs[idx]
-        panel = load_and_draw(img_path, mask_path)
-        cv2.imshow("Nails Segmentation Viewer", panel)
-
-        key = cv2.waitKey(0) & 0xFF
-        if key in (27, ord('q')):
+        ok, frame = cap.read()
+        if not ok:
             break
-        elif key in (ord('n'), ord('d')):  # → или d
-            idx = (idx + 1) % len(pairs)
-        elif key in (ord('p'), ord('a')):  # ← или a
-            idx = (idx - 1) % len(pairs)
 
+        gray = to_gray(frame)
+
+        # Phase timer
+        now = time.time()
+        if now >= next_switch:
+            if phase == "GREEN":
+                phase = "RED"
+                next_switch = now + RED_SEC
+            else:
+                phase = "GREEN"
+                next_switch = now + GREEN_SEC
+
+        # Build motion map ALWAYS (red where motion, green elsewhere)
+        # Build motion map (only when RED phase is active)
+        if phase == "RED" and prev_gray is not None:
+            if use_flow:
+                mask = motion_mask_flow(prev_gray, gray)  # Optical Flow (Farneback)
+            else:
+                mask = motion_mask_diff(prev_gray, gray)  # Frame difference
+            map_img = two_color_map(mask, gray.shape)
+        else:
+            # During GREEN phase or first frame: all green (no motion detection)
+            map_img = two_color_map(np.zeros_like(gray), gray.shape)
+
+        # Text at edge (top-left)
+        mode = "Flow" if use_flow else "Diff"
+        label = "RED light (detect ON)" if phase == "RED" else "GREEN light (detect OFF)"
+        color = (0,0,255) if phase == "RED" else (0,255,0)
+        cv2.putText(frame, label, (16, 36), cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2, cv2.LINE_AA)
+        cv2.putText(frame, f"Mode: {mode}", (16, 68), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2, cv2.LINE_AA)
+
+        # Show
+        cv2.imshow(win_cam, frame)
+        cv2.imshow(win_map, map_img)
+        prev_gray = gray
+
+        # Keys
+        key = cv2.waitKey(1) & 0xFF
+        if key in (27, ord('q'), ord('Q')):
+            break
+        elif key in (ord('o'), ord('O')):
+            use_flow = not use_flow
+
+    cap.release()
     cv2.destroyAllWindows()
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@ import cv2
 
 def main():
     # 🔹 Укажи путь к видеофайлу здесь
-    video_path = "/Users/xxx/Desktop/Учеба/Python/Pac/5Block/sample-10s.mp4"
+    video_path = "sample-10s.mp4"  # пример: "data/video.avi" или полный путь
 
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -20,7 +20,7 @@ def main():
         cv2.imshow("Grayscale Video", gray)
 
         key = cv2.waitKey(10) & 0xFF
-        if key in (ord('q')):
+        if key in (27, ord('q')):
             break
 
     cap.release()
