@@ -1,0 +1,115 @@
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Виртуальные окружения
+.venv/
+venv/
+env/
+ENV/
+.conda/
+*.env
+*.venv
+
+# Кеши и временные файлы
+*.log
+*.pot
+*.pyc
+*.pyo
+*.pyd
+*.swp
+*.bak
+*.tmp
+*.old
+
+# Тесты и покрытия
+.coverage
+.tox/
+.nox/
+.pytest_cache/
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+
+# IDE и редакторы
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Компиляция / билды
+build/
+dist/
+*.egg-info/
+.eggs/
+*.manifest
+*.spec
+
+# Jupyter / Colab
+.ipynb_checkpoints/
+*.ipynb_convert*
+
+# Data / outputs
+data/
+datasets/
+*.csv
+*.tsv
+*.xls
+*.xlsx
+*.json
+*.xml
+*.h5
+*.pkl
+*.bin
+*.npy
+*.npz
+*.joblib
+
+# Картинки, видео, аудио
+*.jpg
+*.jpeg
+*.png
+*.bmp
+*.gif
+*.mp4
+*.avi
+*.mov
+*.wav
+*.mp3
+
+# Системные файлы
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# KaggleHub и большие датасеты
+kagglehub/
+*.zip
+*.tar
+*.gz
+*.7z
+
+# Кеш библиотек
+__pypackages__/
+pip-wheel-metadata/
+*.egg
+*.whl
+
+# PyInstaller
+*.spec
+
+# Jupyter nbconvert
+*.nbconvert/
+
+# PyCharm / JetBrains
+.idea/
+*.iml
+out/
+
+# Spyder
+.spyproject/
+
+# VS Code
+.vscode/
