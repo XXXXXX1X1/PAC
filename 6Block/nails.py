@@ -2,7 +2,6 @@ import os, random, cv2, numpy as np
 
 # ---------- загрузка ----------
 def _load_pairs(images_dir, masks_dir):
-    # ТВОЙ ПОИСК ПАР (двойной цикл по спискам файлов)
     image_files = [f for f in os.listdir(images_dir) if not f.startswith('.')]
     label_files = [f for f in os.listdir(masks_dir)  if not f.startswith('.')]
 
@@ -12,7 +11,6 @@ def _load_pairs(images_dir, masks_dir):
         for label_file in label_files:
             label_name = os.path.splitext(label_file)[0]
             if name == label_name:
-                # возвращаем ПОЛНЫЕ ПУТИ, чтобы ниже ничего не менять
                 pairs.append((os.path.join(images_dir, img_file),
                               os.path.join(masks_dir,  label_file)))
                 break
