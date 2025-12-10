@@ -39,7 +39,7 @@ def motion_mask_flow(prev_gray, gray):
     # Модуль вектора движения
     mag, _ = cv2.cartToPolar(flow[..., 0], flow[..., 1])
     # Порог по скорости → бинарная маска
-    m = (mag > 2.0).astype(np.uint8) * 255
+    m = (mag > 2.0).astype(np.uint8)    * 255
     # Очистка мелкого шума
     m = cv2.morphologyEx(m, cv2.MORPH_OPEN, KERNEL, iterations=1)
     return m

@@ -1,15 +1,14 @@
-# =====================================
-# MNIST + average_digit + перцептрон + t-SNE
-# через torchvision (только для загрузки данных)
-# =====================================
 
 import numpy as np
 import matplotlib.pyplot as plt
 
 from sklearn.metrics import precision_score, recall_score
 from sklearn.manifold import TSNE
+import ssl
+ssl._create_default_https_context = ssl._create_unverified_context
 
 import torchvision
+
 
 plt.rcParams['figure.figsize'] = (6, 6)
 
@@ -22,7 +21,7 @@ train_dataset = torchvision.datasets.MNIST(
     root="./MNIST",
     train=True,
     transform=transform,
-    download=True,   # если датасет уже скачан, можно поставить False
+    download=True,
 )
 
 test_dataset = torchvision.datasets.MNIST(

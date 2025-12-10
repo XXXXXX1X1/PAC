@@ -10,45 +10,50 @@ os.makedirs("data", exist_ok=True)   # папка data в 8Block
 
 # ==================== 1. ИЗВЛЕЧЕНИЕ ПРИЗНАКОВ ====================
 
-df = pd.read_csv("wells_info_with_prod.csv")  # раз запускаешь из 8Block, путь можно укоротить
+df = pd.read_csv("wells_info_with_prod.csv")
 
-# --- 1.1. Сохраняем исходные столбцы (дата и категориальный) ---
-df["SpudDate"] = pd.to_datetime(df["SpudDate"])      # дата (останется в df)
-df["operatorNameIHS"] = df["operatorNameIHS"]        # категориальный (останется в df)
+df["SpudDate"] = pd.to_datetime(df["SpudDate"])
 
 # --- 1.2. Признаки из даты бурения (SpudDate) ---
-df["SpudMonth"] = df["SpudDate"].dt.month
-df["SpudQuarter"] = df["SpudDate"].dt.quarter
-df["SpudYear"] = df["SpudDate"].dt.year
+df["SpudMonth"] = df["SpudDate"].dt.month          # месяц бурения (1–12)
+df["SpudQuarter"] = df["SpudDate"].dt.quarter      # квартал бурения (1–4)
+df["SpudYear"] = df["SpudDate"].dt.year            # год бурения скважины
 
 # --- 1.3. Рабочие даты и интервалы ---
-df["PermitDate"] = pd.to_datetime(df["PermitDate"])
-df["CompletionDate"] = pd.to_datetime(df["CompletionDate"])
-df["FirstProductionDate"] = pd.to_datetime(df["FirstProductionDate"])
+df["PermitDate"] = pd.to_datetime(df["PermitDate"])              # дата получения разрешения (permit)
+df["CompletionDate"] = pd.to_datetime(df["CompletionDate"])      # дата завершения строительства/заканчивание
+df["FirstProductionDate"] = pd.to_datetime(df["FirstProductionDate"])  # дата начала добычи
 
 df["PermitToSpudDays"] = (df["SpudDate"] - df["PermitDate"]).dt.days
+# количество дней от разрешения до начала бурения
+
 df["DrillingDurationDays"] = (df["CompletionDate"] - df["SpudDate"]).dt.days
+# длительность бурения/строительства скважины в днях
+
 df["CompletionToProductionDays"] = (
     df["FirstProductionDate"] - df["CompletionDate"]
 ).dt.days
+# количество дней от завершения работ до начала добычи
 
 # --- 1.4. Технологические признаки ---
 df["TotalProppant"] = df["PROP_PER_FOOT"] * df["LATERAL_LENGTH_BLEND"]
+# суммарный объём проппанта по всей длине ствола
+
 df["TotalWater"] = df["WATER_PER_FOOT"] * df["LATERAL_LENGTH_BLEND"]
+# суммарный объём закачанной воды по всей длине ствола
+
 df["ProppantIntensity"] = df["PROP_PER_FOOT"] / df["LATERAL_LENGTH_BLEND"]
+# "интенсивность" проппанта: проппанта на фут относительно длины (нормировка)
 
 # --- 1.5. География ---
 df["LateralDistance"] = np.sqrt(
     (df["LatWGS84"] - df["BottomHoleLatitude"]) ** 2
     + (df["LonWGS84"] - df["BottomHoleLongitude"]) ** 2
 )
+# горизонтальное расстояние между устьем и забоем по координатам (евклидова дистанция)
 
-# --- 1.6. Категория длины ствола ---
-df["LateralLengthCategory"] = pd.cut(
-    df["LATERAL_LENGTH_BLEND"],
-    bins=[0, 5000, 8000, float("inf")],
-    labels=["short", "medium", "long"],
-)
+
+
 
 # ==================== 2. ФОРМИРОВАНИЕ X И y ====================
 
@@ -78,9 +83,8 @@ feature_cols = [
     # географический
     "LateralDistance",
 
-    # категориальные (оставляем как есть, без one-hot)
+    # категориальные
     "operatorNameIHS",
-    "LateralLengthCategory",
     "BasinName",
     "formation",
 ]
@@ -98,6 +102,7 @@ X_train, X_test, y_train, y_test = train_test_split(
 
 # ==================== 4. МАСШТАБИРОВАНИЕ (ТОЛЬКО ЧИСЛОВЫЕ ПРИЗНАКИ) ====================
 
+# список имён только числовых признаков
 num_cols = X_train.select_dtypes(include=[np.number]).columns
 
 scaler_X = StandardScaler()
@@ -127,7 +132,7 @@ df.to_csv("data/wells_with_features.csv", index=False)
 X_train_scaled.to_csv("data/X_train_scaled.csv", index=False)
 X_test_scaled.to_csv("data/X_test_scaled.csv", index=False)
 
-# масштабированный y (опционально, но полезно)
+# масштабированный y
 pd.DataFrame({"Prod1Year_scaled": y_train_scaled.flatten()}).to_csv(
     "data/y_train_scaled.csv", index=False
 )
@@ -135,7 +140,7 @@ pd.DataFrame({"Prod1Year_scaled": y_test_scaled.flatten()}).to_csv(
     "data/y_test_scaled.csv", index=False
 )
 
-print(X_train_scaled.shape)
-print(X_test_scaled.shape)
+# print(X_train_scaled.shape)
+# print(X_test_scaled.shape)
 
 print("\nФайлы сохранены в папку 8Block/data")
