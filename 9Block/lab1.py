@@ -51,32 +51,9 @@ X_test_scaled = scaler.transform(X_test)
 
 # ---------- 4.1. Дерево решений (Decision Tree) с GridSearchCV ----------
 
-# tree_base = DecisionTreeClassifier(random_state=42)
-#
-# tree_param_grid = {
-#     "max_depth": [3, 4, 5, 6, None],
-#     "min_samples_split": [2, 5, 10],
-#     "min_samples_leaf": [1, 2, 4],
-#     "criterion": ["gini", "entropy"],
-# }
-#
-# tree_grid = GridSearchCV(
-#     estimator=tree_base,
-#     param_grid=tree_param_grid,
-#     scoring="accuracy",  # метрика качества
-#     cv=5,                # 5-кратная кросс-валидация
-#     n_jobs=-1,           # использовать все ядра
-# )
-#
-# tree_grid.fit(X_train, y_train)
-#
-# tree_clf = tree_grid.best_estimator_
-# y_pred_tree = tree_clf.predict(X_test)
-# acc_tree = accuracy_score(y_test, y_pred_tree)
-
 
 tree_clf = DecisionTreeClassifier(
-    max_depth=5,  # разумное ограничение глубины
+    max_depth=5,
     random_state=42,
 )
 
