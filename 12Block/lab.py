@@ -1,209 +1,110 @@
 import numpy as np
 
-# =========================
-# 1) Вспомогательные вещи
-# =========================
-
-def sigmoid(z: float) -> float:
-    """Сигмоида: переводит число в диапазон (0..1)."""
+def sigmoid(z):
     return 1.0 / (1.0 + np.exp(-z))
 
-def sigmoid_derivative_from_output(y: float) -> float:
-    """
-    Производная сигмоиды, если мы уже знаем y = sigmoid(z).
-    d/dz sigmoid(z) = y * (1 - y)
-    """
+def dsigmoid_from_y(y):
+    # y = sigmoid(z)  =>  dy/dz = y*(1-y)
     return y * (1.0 - y)
 
 
-# =========================
-# 2) Один нейрон
-# =========================
-
 class Neuron:
-    def __init__(self, input_size: int, lr: float = 0.1):
-        """
-        input_size: сколько "обычных" входов (без bias).
-        lr: скорость обучения (шаг градиентного спуска).
-        """
+    def __init__(self, input_size, lr=0.1):
+        # +1 под bias
+        self._weights = np.random.randn(input_size + 1) * 0.1
         self.lr = lr
 
-        # +1 вес под bias, потому что bias мы будем добавлять как дополнительный вход "1.0"
-        self.w = np.random.randn(input_size + 1) * 0.1
-
-        # Сохраняем данные последнего forward — это нужно для backward
-        self.last_x_ext = None   # вход с bias: [x1, x2, 1.0]
-        self.last_y = None       # выход y
-        self.last_z = None       # линейная сумма z
+        self.last_input = None   # x с bias
+        self.last_output = None  # y
 
     def forward(self, x):
-        """
-        Прямой проход.
-        x: вход без bias, например [0, 1] или [h1_out, h2_out]
-        """
         x = np.asarray(x, dtype=float)
-
-        # Добавляем bias как дополнительный вход = 1.0
-        x_ext = np.append(x, 1.0)
-
-        # Линейная часть: z = w·x
-        z = float(np.dot(self.w, x_ext))
-
-        # Нелинейность
+        x_ext = np.append(x, 1.0)           # bias вход = 1
+        z = np.dot(self._weights, x_ext)    # расстояние до гиперплоскости (с точностью до масштаба)
         y = sigmoid(z)
 
-        # Сохраняем для backward
-        self.last_x_ext = x_ext
-        self.last_z = z
-        self.last_y = y
-
+        self.last_input = x_ext
+        self.last_output = y
         return y
 
-    def backward(self, grad_L_by_y):
+    def backward(self, x, grad_output):
         """
-        Обратный проход для одного нейрона.
-
-        grad_L_by_y = dL/dy (градиент потерь по выходу нейрона).
-        Возвращаем dL/dx (по входам НЕ включая bias).
-
-        Пара слов:
-        y = sigmoid(z)
-        z = sum(w_i * x_i)
+        x — по ТЗ передаём, но реально используем last_input.
+        grad_output = dL/dy (ошибка/градиент на выходе нейрона)
         """
+        x_ext = self.last_input
+        y = self.last_output
 
-        # 1) Берём сохранённые значения с forward
-        x_ext = self.last_x_ext
-        y = self.last_y
+        dy_dz = dsigmoid_from_y(y)
+        dL_dz = grad_output * dy_dz
 
-        # 2) Считаем dL/dz через цепное правило:
-        #    dL/dz = dL/dy * dy/dz
-        dy_dz = sigmoid_derivative_from_output(y)
-        grad_L_by_z = grad_L_by_y * dy_dz
+        # dL/dw = dL/dz * x
+        grad_w = dL_dz * x_ext
 
-        # 3) Градиент по весам:
-        #    dL/dw_i = dL/dz * x_i
-        grad_w = grad_L_by_z * x_ext
+        # градиент по входу считается по старым весам
+        w_old = self._weights.copy()
 
-        # ⚠️ Важный момент:
-        # Градиент по входу должен считаться по "старым" весам (до обновления).
-        w_old = self.w.copy()
+        # шаг градиентного спуска (весовая нормаль + смещение)
+        self._weights -= self.lr * grad_w
 
-        # 4) Обновляем веса градиентным спуском:
-        #    w := w - lr * dL/dw
-        self.w -= self.lr * grad_w
-
-        # 5) Градиент по входу (без bias):
-        #    dL/dx_i = dL/dz * w_i
-        #    bias-вес не возвращаем, поэтому w_old[:-1]
-        grad_x = grad_L_by_z * w_old[:-1]
-
-        return grad_x
+        # dL/dx = dL/dz * w (без bias)
+        grad_input = dL_dz * w_old[:-1]
+        return grad_input
 
 
-# =========================
-# 3) Модель 2-2-1 для XOR
-# =========================
-
-class XORModel:
-    def __init__(self, lr: float = 0.1, seed: int = 42):
+class Model:
+    def __init__(self, lr=0.1, seed=42):
         np.random.seed(seed)
-
-        # Скрытый слой: два нейрона, каждый принимает 2 входа (x1, x2)
-        self.h1 = Neuron(input_size=2, lr=lr)
-        self.h2 = Neuron(input_size=2, lr=lr)
-
-        # Выходной нейрон: принимает 2 входа (h1_out, h2_out)
-        self.out = Neuron(input_size=2, lr=lr)
-
-        # Для удобства сохраним последний hidden
-        self.last_hidden = None
+        self.h1 = Neuron(2, lr=lr)
+        self.h2 = Neuron(2, lr=lr)
+        self.out = Neuron(2, lr=lr)
 
     def forward(self, x):
+        h1 = self.h1.forward(x)
+        h2 = self.h2.forward(x)
+        y = self.out.forward([h1, h2])
+        return y
+
+    def backward(self, x, err):
         """
-        x: [x1, x2]
+        По ТЗ: model.backward(x, err)
+        err здесь — это dL/dy_out
         """
-        x = np.asarray(x, dtype=float)
+        hidden = np.array([self.h1.last_output, self.h2.last_output], dtype=float)
 
-        h1_out = self.h1.forward(x)
-        h2_out = self.h2.forward(x)
-
-        hidden = np.array([h1_out, h2_out], dtype=float)
-        self.last_hidden = hidden
-
-        y_pred = self.out.forward(hidden)
-        return y_pred
-
-    def backward(self, grad_L_by_y_pred):
-        """
-        grad_L_by_y_pred = dL/dy_pred
-        Сначала обучаем выходной нейрон, потом скрытые.
-        """
-
-        # 1) Прогоняем backward через выходной нейрон
-        #    Получаем градиент по hidden: [dL/dh1_out, dL/dh2_out]
-        grad_hidden = self.out.backward(grad_L_by_y_pred)
-
-        # 2) Прогоняем градиенты дальше в скрытый слой
-        #    Тут каждый скрытый нейрон получает "свой" градиент
-        _ = self.h1.backward(grad_hidden[0])
-        _ = self.h2.backward(grad_hidden[1])
+        grad_hidden = self.out.backward(hidden, err)   # вернёт [dL/dh1, dL/dh2]
+        self.h1.backward(x, grad_hidden[0])
+        self.h2.backward(x, grad_hidden[1])
 
 
-# =========================
-# 4) Обучение XOR
-# =========================
+def mse(y, t):
+    return 0.5 * (y - t) ** 2
 
-def mse_loss(y_pred: float, y_true: float) -> float:
-    """MSE = 0.5 * (y - t)^2 (так удобнее для производной)."""
-    return 0.5 * (y_pred - y_true) ** 2
-
-def grad_mse_by_pred(y_pred: float, y_true: float) -> float:
-    """d/dy [0.5*(y-t)^2] = (y - t)"""
-    return (y_pred - y_true)
+def d_mse_dy(y, t):
+    return (y - t)
 
 
 if __name__ == "__main__":
-    # XOR данные
-    X = np.array([
-        [0.0, 0.0],
-        [0.0, 1.0],
-        [1.0, 0.0],
-        [1.0, 1.0],
-    ], dtype=float)
+    X = np.array([[0,0],[0,1],[1,0],[1,1]], dtype=float)
+    Y = np.array([0,1,1,0], dtype=float)
 
-    y = np.array([0.0, 1.0, 1.0, 0.0], dtype=float)
+    model = Model(lr=0.1, seed=42)
 
-    model = XORModel(lr=0.1, seed=42)
-
-    epochs = 1000000
-
-    # Если хочешь “наглядно”, можно включить подробные логи на первых эпохах
-    VERBOSE = False
-
+    epochs = 150000
     for epoch in range(epochs):
         total_loss = 0.0
 
-        for x_i, t_i in zip(X, y):
-            # 1) forward
-            y_pred = model.forward(x_i)
+        for x, t in zip(X, Y):
+            y_pred = model.forward(x)
+            total_loss += mse(y_pred, t)
 
-            # 2) loss
-            total_loss += mse_loss(y_pred, t_i)
+            err = d_mse_dy(y_pred, t)      # это dL/dy
+            model.backward(x, err)
 
-            # 3) градиент loss по выходу сети
-            grad = grad_mse_by_pred(y_pred, t_i)
+        if epoch % 10000 == 0:
+            print(f"Epoch {epoch:6d} | total_loss = {total_loss:.6f}")
 
-            # 4) backward (обновит веса)
-            model.backward(grad)
-
-            if VERBOSE and epoch < 2:
-                print(f"x={x_i}, t={t_i}, y_pred={y_pred:.4f}, loss={mse_loss(y_pred,t_i):.6f}")
-
-        if epoch % 2000 == 0:
-            print(f"Epoch {epoch:5d} | total_loss = {total_loss:.6f}")
-
-    # Проверка
-    print("\nИтоговые предсказания XOR:\n")
-    for x_i, t_i in zip(X, y):
-        y_pred = model.forward(x_i)
-        print(f"input {x_i} -> pred={y_pred:.4f}, target={t_i}")
+    print("\nPredictions:")
+    for x, t in zip(X, Y):
+        y_pred = model.forward(x)
+        print(x, "->", float(y_pred), "target", t)
