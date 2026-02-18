@@ -1,0 +1,10 @@
+openwakeword
+onnxruntime
+torch
+onnx
+numpy
+scipy
+soundfile
+sounddevice
+tqdm
+piper-tts
