@@ -1,195 +1,214 @@
 import os
-import random
+import re
 import numpy as np
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import torch.optim as optim
-
-from PIL import Image
-from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms
-import torchvision.models as models
-from torchvision.models import ResNet18_Weights
+from sklearn.model_selection import train_test_split
+import tensorflow as tf
+from tensorflow.keras import backend as K
+from tensorflow.keras.layers import Input, Lambda, Dense, Dropout, Conv2D, MaxPooling2D, Flatten
+from tensorflow.keras.models import Sequential, Model
+from tensorflow.keras.optimizers import RMSprop
 
 
-DATA_ROOT = "/Users/xxx/Desktop/Учеба/Python/Pac/4_semestr/2_Lab/orl_faces"
-NUM_TRAIN_PERSONS = 27
-BATCH_SIZE = 16
-EPOCHS = 10
-LR = 1e-3
-MARGIN = 1.0
+# --- важно для TF на CPU ---
+tf.keras.backend.set_image_data_format("channels_last")
 
 
-def get_device():
-    if torch.cuda.is_available():
-        return "cuda"
-    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        return "mps"
-    return "cpu"
+# ---------- PGM reader (P5) ----------
+def read_pgm(path: str) -> np.ndarray:
+    """
+    Reads binary PGM (P5) and returns uint8 array (H, W).
+    ORL/ATT faces dataset compatible.
+    """
+    with open(path, "rb") as f:
+        buf = f.read()
+
+    m = re.search(
+        br"^P5\s(?:\s*#.*[\r\n])*"
+        br"(\d+)\s(?:\s*#.*[\r\n])*"
+        br"(\d+)\s(?:\s*#.*[\r\n])*"
+        br"(\d+)\s",
+        buf
+    )
+    if m is None:
+        raise ValueError(f"Not a valid binary PGM (P5): {path}")
+
+    w = int(m.group(1))
+    h = int(m.group(2))
+    maxval = int(m.group(3))
+    offset = m.end()  # конец заголовка
+
+    if maxval < 256:
+        img = np.frombuffer(buf, dtype=np.uint8, count=w * h, offset=offset)
+    else:
+        img = np.frombuffer(buf, dtype=">u2", count=w * h, offset=offset)
+
+    return img.reshape((h, w))
 
 
-def list_images(folder):
-    imgs = []
-    for f in os.listdir(folder):
-        p = os.path.join(folder, f)
-        if os.path.isfile(p) and f.lower().endswith(".pgm"):
-            imgs.append(p)
-    imgs.sort()
-    return imgs
+# ---------- Pair generator (channels_last) ----------
+def get_pairs_orl(data_dir: str, downsample: int = 2, total_pos_per_person: int = 250, seed: int = 42):
+    """
+    Output:
+      X: (N, 2, H, W, 1) float32 in [0,1]
+      Y: (N, 1) float32 labels (1 same, 0 different)
+    """
+    rng = np.random.default_rng(seed)
+
+    probe = read_pgm(os.path.join(data_dir, "s1", "1.pgm"))[::downsample, ::downsample]
+    H, W = probe.shape
+
+    n_persons = 40
+    n_imgs = 10
+
+    total_pos = n_persons * total_pos_per_person
+    total_neg = total_pos  # баланс
+
+    X_pos = np.zeros((total_pos, 2, H, W, 1), dtype=np.float32)
+    y_pos = np.ones((total_pos, 1), dtype=np.float32)
+
+    # positive pairs (same person)
+    k = 0
+    for person in range(1, n_persons + 1):
+        for _ in range(total_pos_per_person):
+            a = b = 0
+            while a == b:
+                a = rng.integers(1, n_imgs + 1)
+                b = rng.integers(1, n_imgs + 1)
+
+            img1 = read_pgm(os.path.join(data_dir, f"s{person}", f"{a}.pgm"))[::downsample, ::downsample]
+            img2 = read_pgm(os.path.join(data_dir, f"s{person}", f"{b}.pgm"))[::downsample, ::downsample]
+
+            X_pos[k, 0, :, :, 0] = img1
+            X_pos[k, 1, :, :, 0] = img2
+            k += 1
+
+    X_neg = np.zeros((total_neg, 2, H, W, 1), dtype=np.float32)
+    y_neg = np.zeros((total_neg, 1), dtype=np.float32)
+
+    # negative pairs (different persons)
+    k = 0
+    for _ in range(total_neg):
+        p1 = p2 = 1
+        while p1 == p2:
+            p1 = rng.integers(1, n_persons + 1)
+            p2 = rng.integers(1, n_persons + 1)
+
+        a = rng.integers(1, n_imgs + 1)
+        b = rng.integers(1, n_imgs + 1)
+
+        img1 = read_pgm(os.path.join(data_dir, f"s{p1}", f"{a}.pgm"))[::downsample, ::downsample]
+        img2 = read_pgm(os.path.join(data_dir, f"s{p2}", f"{b}.pgm"))[::downsample, ::downsample]
+
+        X_neg[k, 0, :, :, 0] = img1
+        X_neg[k, 1, :, :, 0] = img2
+        k += 1
+
+    X = np.concatenate([X_pos, X_neg], axis=0) / 255.0
+    Y = np.concatenate([y_pos, y_neg], axis=0)
+
+    # перемешаем
+    idx = rng.permutation(X.shape[0])
+    return X[idx], Y[idx]
 
 
-def create_pairs(root, num_train_persons):
-    folders = [os.path.join(root, f) for f in os.listdir(root)
-               if os.path.isdir(os.path.join(root, f)) and f.startswith("s")]
-    folders.sort()
-    random.shuffle(folders)
+# ---------- Base CNN (shared) ----------
+def build_base_network(input_shape):
+    # input_shape: (H, W, 1)  -> channels_last
+    return Sequential([
+        Input(shape=input_shape),
 
-    train_people = {}
-    test_people = {}
+        Conv2D(6, (3, 3), activation="relu", padding="valid"),
+        MaxPooling2D((2, 2)),
+        Dropout(0.25),
 
-    for idx, folder in enumerate(folders):
-        imgs = list_images(folder)[:10]
-        if len(imgs) < 2:
-            continue
-        if idx < num_train_persons:
-            train_people[idx] = imgs
-        else:
-            test_people[idx] = imgs
+        Conv2D(12, (3, 3), activation="relu", padding="valid"),
+        MaxPooling2D((2, 2)),
+        Dropout(0.25),
 
-    def build_pairs(people_dict):
-        ids = sorted(people_dict.keys())
-        pairs = []
-
-        # positive pairs
-        for i in ids:
-            imgs = people_dict[i]
-            for a in range(len(imgs)):
-                for b in range(a + 1, len(imgs)):
-                    pairs.append([imgs[a], imgs[b], 1])
-
-        # negative pairs (по 1 паре на пару людей)
-        for a in range(len(ids)):
-            for b in range(a + 1, len(ids)):
-                i, k = ids[a], ids[b]
-                pairs.append([people_dict[i][0], people_dict[k][0], 0])
-
-        random.shuffle(pairs)
-        return pairs
-
-    return build_pairs(train_people), build_pairs(test_people)
+        Flatten(),
+        Dense(128, activation="relu"),
+        Dropout(0.1),
+        Dense(50, activation="relu"),  # embedding
+    ])
 
 
-class FacePairsDataset(Dataset):
-    def __init__(self, pairs):
-        self.pairs = pairs
-        self.t = transforms.Compose([
-            transforms.Resize((224, 224)),
-            transforms.ToTensor(),
-            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-        ])
-
-    def __len__(self):
-        return len(self.pairs)
-
-    def __getitem__(self, idx):
-        p1, p2, y = self.pairs[idx]
-        x1 = self.t(Image.open(p1).convert("RGB"))
-        x2 = self.t(Image.open(p2).convert("RGB"))
-        return x1, x2, torch.tensor(y, dtype=torch.float32)
+def euclidean_distance(vects):
+    x, y = vects
+    return K.sqrt(K.maximum(K.sum(K.square(x - y), axis=1, keepdims=True), K.epsilon()))
 
 
-class Siamese(nn.Module):
-    def __init__(self, margin=1.0):
-        super().__init__()
-        resnet = models.resnet18(weights=ResNet18_Weights.DEFAULT)
-        self.features = nn.Sequential(*list(resnet.children())[:-1])  # (B,512,1,1)
-        self.fc = nn.Linear(resnet.fc.in_features, 128)
-        self.margin = margin
-
-    def encode(self, x):
-        x = self.features(x)
-        x = torch.flatten(x, 1)
-        x = self.fc(x)
-        return x
-
-    def forward(self, x1, x2):
-        return self.encode(x1), self.encode(x2)
-
-    def loss(self, z1, z2, y):
-        d = F.pairwise_distance(z1, z2)        # (B,)
-        loss_same = y * 0.5 * (d ** 2)
-        loss_diff = (1 - y) * 0.5 * (torch.clamp(self.margin - d, min=0.0) ** 2)
-        return (loss_same + loss_diff).mean()
+def contrastive_loss(margin=1.0):
+    def loss(y_true, y_pred):
+        return K.mean(
+            y_true * K.square(y_pred) +
+            (1.0 - y_true) * K.square(K.maximum(margin - y_pred, 0.0))
+        )
+    return loss
 
 
-@torch.no_grad()
-def test_accuracy(model, loader, device, thr=None):
-    model.eval()
+def compute_accuracy(distances, labels, threshold=0.5):
+    preds_same = (distances.ravel() < threshold).astype(np.float32)
+    return float(np.mean(preds_same == labels.ravel()))
 
-    # простой порог = середина средних расстояний same/diff
-    if thr is None:
-        ds, dd = [], []
-        for x1, x2, y in loader:
-            x1, x2 = x1.to(device), x2.to(device)
-            y = y.to(device).view(-1)
-            z1, z2 = model(x1, x2)
-            d = F.pairwise_distance(z1, z2).view(-1)
-            ds.append(d[y == 1].cpu().numpy())
-            dd.append(d[y == 0].cpu().numpy())
-        ds = np.concatenate([a for a in ds if len(a) > 0])
-        dd = np.concatenate([a for a in dd if len(a) > 0])
-        thr = 0.5 * (float(ds.mean()) + float(dd.mean()))
 
-    correct = 0
-    total = 0
-    for x1, x2, y in loader:
-        x1, x2 = x1.to(device), x2.to(device)
-        y = y.to(device).view(-1)
-        z1, z2 = model(x1, x2)
-        d = F.pairwise_distance(z1, z2).view(-1)
-        pred = (d < thr).float()
-        correct += (pred == y).sum().item()
-        total += y.numel()
-
-    return 100.0 * correct / total, thr
+def find_best_threshold(distances, labels):
+    # грубо, но быстро: перебор порогов по квантилям расстояний
+    d = distances.ravel()
+    y = labels.ravel()
+    candidates = np.quantile(d, np.linspace(0.01, 0.99, 99))
+    best_t, best_acc = candidates[0], -1.0
+    for t in candidates:
+        acc = compute_accuracy(distances, labels, threshold=float(t))
+        if acc > best_acc:
+            best_acc, best_t = acc, float(t)
+    return best_t, best_acc
 
 
 def main():
-    random.seed(42)
-    np.random.seed(42)
-    torch.manual_seed(42)
+    # Поменяй на свой путь
+    data_dir = "/Users/xxx/Desktop/Учеба/Python/Pac/4_semestr/2_Lab/orl_faces"
 
-    device = get_device()
-    print("device:", device)
+    X, Y = get_pairs_orl(data_dir, downsample=2, total_pos_per_person=250, seed=42)
 
-    train_pairs, test_pairs = create_pairs(DATA_ROOT, NUM_TRAIN_PERSONS)
+    x_train, x_test, y_train, y_test = train_test_split(
+        X, Y,
+        test_size=0.2,
+        random_state=42,
+        stratify=Y.ravel().astype(int)
+    )
 
-    train_loader = DataLoader(FacePairsDataset(train_pairs), batch_size=BATCH_SIZE, shuffle=True, num_workers=0)
-    test_loader  = DataLoader(FacePairsDataset(test_pairs),  batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
+    input_dim = x_train.shape[2:]  # (H, W, 1)
 
-    model = Siamese(margin=MARGIN).to(device)
-    opt = optim.Adam(model.parameters(), lr=LR)
+    img_a = Input(shape=input_dim)
+    img_b = Input(shape=input_dim)
 
-    for epoch in range(EPOCHS):
-        model.train()
-        total_loss = 0.0
-        for x1, x2, y in train_loader:
-            x1, x2 = x1.to(device), x2.to(device)
-            y = y.to(device).view(-1)
+    base_network = build_base_network(input_dim)
+    feat_a = base_network(img_a)
+    feat_b = base_network(img_b)
 
-            opt.zero_grad()
-            z1, z2 = model(x1, x2)
-            loss = model.loss(z1, z2, y)
-            loss.backward()
-            opt.step()
+    dist = Lambda(euclidean_distance)([feat_a, feat_b])
 
-            total_loss += loss.item()
+    model = Model([img_a, img_b], dist)
+    model.compile(optimizer=RMSprop(learning_rate=1e-3), loss=contrastive_loss(margin=1.0))
 
-        avg_loss = total_loss / len(train_loader)
-        acc, thr = test_accuracy(model, test_loader, device, thr=None)
-        print(f"Epoch {epoch+1}/{EPOCHS} | loss={avg_loss:.4f} | test_acc={acc:.2f}% | thr={thr:.4f}")
+    model.fit(
+        [x_train[:, 0], x_train[:, 1]],
+        y_train,
+        validation_split=0.25,
+        batch_size=128,
+        epochs=13,
+        verbose=2
+    )
+
+    pred = model.predict([x_test[:, 0], x_test[:, 1]], verbose=0)
+
+    # точность с порогом 0.5 + лучший порог (под тест, чисто для оценки)
+    acc_05 = compute_accuracy(pred, y_test, threshold=0.5)
+    best_t, best_acc = find_best_threshold(pred, y_test)
+
+    print("Test accuracy (threshold=0.5):", acc_05)
+    print("Best threshold:", best_t, "Best test accuracy:", best_acc)
 
 
 if __name__ == "__main__":
