@@ -10,13 +10,13 @@ import matplotlib.pyplot as plt
 # 1) INPUTS
 # -------------------------
 template_path = "dino2.png"
-search_path   = "dino3.jpg"
+search_path = "dino.jpg"
 
 y1, y2 = 480, 560
 x1, x2 = 30, 230
 
 temp_rgb = cv2.cvtColor(cv2.imread(template_path), cv2.COLOR_BGR2RGB)
-img_rgb  = cv2.cvtColor(cv2.imread(search_path),  cv2.COLOR_BGR2RGB)
+img_rgb = cv2.cvtColor(cv2.imread(search_path), cv2.COLOR_BGR2RGB)
 template = temp_rgb[y1:y2, x1:x2]
 
 
@@ -25,20 +25,25 @@ template = temp_rgb[y1:y2, x1:x2]
 # -------------------------
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
-layer4_features = None   # сюда hook положит output layer4
-avgpool_emb = None       # сюда hook положит output avgpool
+layer4_features = None  # сюда hook положит output layer4
+avgpool_emb = None  # сюда hook положит output avgpool
+
 
 def hook_layer4(module, inputs, output):
     global layer4_features
     layer4_features = output
 
+
 def hook_avgpool(module, inputs, output):
     global avgpool_emb
     avgpool_emb = output
 
-model = torchvision.models.resnet18(
-    weights=torchvision.models.ResNet18_Weights.DEFAULT
-).to(device).eval()
+
+model = (
+    torchvision.models.resnet18(weights=torchvision.models.ResNet18_Weights.DEFAULT)
+    .to(device)
+    .eval()
+)
 
 # регистрируем hooks
 model.layer4.register_forward_hook(hook_layer4)
@@ -48,11 +53,13 @@ model.avgpool.register_forward_hook(hook_avgpool)
 # 3) ImageNet normalization
 # -------------------------
 mean = torch.tensor([0.485, 0.456, 0.406], device=device)[None, :, None, None]
-std  = torch.tensor([0.229, 0.224, 0.225], device=device)[None, :, None, None]
+std = torch.tensor([0.229, 0.224, 0.225], device=device)[None, :, None, None]
+
 
 def prep(rgb: np.ndarray) -> torch.Tensor:
     x = torch.from_numpy(rgb).permute(2, 0, 1).float()[None].to(device) / 255.0
     return (x - mean) / std
+
 
 # -------------------------
 # 4) EXTRACT FEATURES VIA HOOKS
@@ -60,17 +67,17 @@ def prep(rgb: np.ndarray) -> torch.Tensor:
 with torch.no_grad():
     # прогоняем template -> получаем avgpool_emb (q)
     _ = model(prep(template))
-    q = avgpool_emb.flatten()           # (1,512,1,1) -> (512,)
+    q = avgpool_emb.flatten()  # (1,512,1,1) -> (512,)
 
     # прогоняем full image -> получаем layer4_features (fm)
     _ = model(prep(img_rgb))
-    fm = layer4_features.squeeze(0)     # (1,512,h,w) -> (512,h,w)
+    fm = layer4_features.squeeze(0)  # (1,512,h,w) -> (512,h,w)
 
 # -------------------------
 # 5) cosine similarity heatmap
 # -------------------------
-q  = F.normalize(q, dim=0)             # нормируем вектор запроса
-fm = F.normalize(fm, dim=0)            # нормируем каждый вектор fm[:,h,w]
+q = F.normalize(q, dim=0)  # нормируем вектор запроса
+fm = F.normalize(fm, dim=0)  # нормируем каждый вектор fm[:,h,w]
 
 heat = torch.einsum("c,chw->hw", q, fm).cpu().numpy()
 
