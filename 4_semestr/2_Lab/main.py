@@ -167,7 +167,7 @@ def find_best_threshold(distances, labels):
 
 def main():
     # Поменяй на свой путь
-    data_dir = "/Users/xxx/Desktop/Учеба/Python/Pac/4_semestr/2_Lab/orl_faces"
+    data_dir = "/home/alex/PycharmProjects/PAC/4_semestr/2_Lab/orl_faces"
 
     X, Y = get_pairs_orl(data_dir, downsample=2, total_pos_per_person=250, seed=42)
 

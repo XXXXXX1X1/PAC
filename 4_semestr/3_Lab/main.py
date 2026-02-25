@@ -1,6 +1,6 @@
 # EuroSAT + ArcFace (STABLE) + CUDA/MPS/CPU + t-SNE(test) + inference(пары+distance)
-# Идея фикса: считаем ArcFace без arccos (через cos(m), sin(m)), + grad clipping, + нормальные logits для accuracy
-# pip install torch torchvision scikit-learn matplotlib pillow
+# ArcFace margin -> только для loss
+# Accuracy на train/test -> без margin (через обычные cosine logits)
 
 import random
 import numpy as np
@@ -18,7 +18,7 @@ import matplotlib.pyplot as plt
 # -----------------------
 # CONFIG
 # -----------------------
-DATA_DIR = "/Users/xxx/Desktop/Учеба/Python/Pac/4_semestr/3_Lab/EuroSAT_RGB"
+DATA_DIR = "/home/alex/PycharmProjects/PAC/4_semestr/3_Lab/EuroSAT/2750"
 BATCH_SIZE = 64
 EPOCHS = 15
 EMB_DIM = 256
@@ -28,11 +28,11 @@ WEIGHT_DECAY = 1e-4
 SEED = 42
 TEST_RATIO = 0.2
 
-MARGIN_M = 0.4         # angular margin
-SCALE_S = 32.0         # было 32 -> мягче и стабильнее
-CLIP_NORM = 5.0        # защита от взрыва градиентов
+MARGIN_M = 0.4
+SCALE_S = 32.0
+CLIP_NORM = 5.0
 
-NUM_WORKERS = 0        # macOS safe
+NUM_WORKERS = 2
 SAVE_TSNE = "tsne_test.png"
 SAVE_SAME = "pair_same.png"
 SAVE_DIFF = "pair_diff.png"
@@ -52,7 +52,7 @@ def pick_device():
 class EmbedNet(nn.Module):
     def __init__(self, emb_dim: int):
         super().__init__()
-        net = models.resnet18(weights=None)
+        net = models.resnet18(weights=None)  # можно заменить на pretrained при желании
         in_feats = net.fc.in_features
         net.fc = nn.Identity()
         self.backbone = net
@@ -61,17 +61,16 @@ class EmbedNet(nn.Module):
     def forward(self, x):
         x = self.backbone(x)
         x = self.fc(x)
-        x = F.normalize(x, dim=1)   # нормализуем фичи
+        x = F.normalize(x, dim=1)  # L2-нормализация эмбеддингов
         return x
 
 
 # -----------------------
-# ArcFace head (cosine logits) + stable ArcFace logits (без arccos!)
+# Cosine head
 # -----------------------
 class CosineComponent(nn.Module):
     def __init__(self, emb_size: int, output_classes: int):
         super().__init__()
-        self.output_classes = output_classes
         self.W = nn.Parameter(torch.empty(emb_size, output_classes))
         nn.init.kaiming_uniform_(self.W)
 
@@ -82,12 +81,14 @@ class CosineComponent(nn.Module):
         return x_norm @ W_norm
 
 
+# -----------------------
+# Stable ArcFace logits (без arccos)
+# -----------------------
 def arcface_logits_stable(cosine, target, num_classes: int, m: float, s: float):
     """
     Stable ArcFace:
       phi = cos(theta + m) = cos(theta)*cos(m) - sin(theta)*sin(m)
       where sin(theta) = sqrt(1 - cos^2(theta))
-    No arccos -> меньше шанс взрыва градиентов/NaN.
     """
     cosine = cosine.clamp(-1.0 + 1e-7, 1.0 - 1e-7)
 
@@ -117,9 +118,16 @@ def denorm(img_chw: torch.Tensor) -> np.ndarray:
 def save_pair(img1, img2, title: str, out_path: str):
     i1 = denorm(img1)
     i2 = denorm(img2)
+
     plt.figure(figsize=(6, 3))
-    plt.subplot(1, 2, 1); plt.imshow(i1); plt.axis("off")
-    plt.subplot(1, 2, 2); plt.imshow(i2); plt.axis("off")
+    plt.subplot(1, 2, 1)
+    plt.imshow(i1)
+    plt.axis("off")
+
+    plt.subplot(1, 2, 2)
+    plt.imshow(i2)
+    plt.axis("off")
+
     plt.suptitle(title)
     plt.tight_layout()
     plt.savefig(out_path, dpi=200)
@@ -172,12 +180,17 @@ def main():
     ds = datasets.ImageFolder(DATA_DIR, transform=tfm)
     class_names = ds.classes
     C = len(class_names)
+
     print("classes:", class_names)
     print("total images:", len(ds))
 
     n_test = int(len(ds) * TEST_RATIO)
     n_train = len(ds) - n_test
-    train_ds, test_ds = random_split(ds, [n_train, n_test], generator=torch.Generator().manual_seed(SEED))
+    train_ds, test_ds = random_split(
+        ds,
+        [n_train, n_test],
+        generator=torch.Generator().manual_seed(SEED)
+    )
 
     train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS)
     test_loader = DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS)
@@ -209,8 +222,9 @@ def main():
             emb = model(x)
             cosine = head(emb)
 
-            logits = arcface_logits_stable(cosine, y, num_classes=C, m=MARGIN_M, s=SCALE_S)
-            loss = F.cross_entropy(logits, y)
+            # ArcFace logits -> только для loss
+            logits_arc = arcface_logits_stable(cosine, y, num_classes=C, m=MARGIN_M, s=SCALE_S)
+            loss = F.cross_entropy(logits_arc, y)
 
             opt.zero_grad()
             loss.backward()
@@ -220,30 +234,45 @@ def main():
             total_loss += loss.item() * x.size(0)
             total += x.size(0)
 
-            pred = logits.argmax(dim=1)
+            # Accuracy считаем без margin (как на инференсе)
+            logits_eval = cosine * SCALE_S
+            pred = logits_eval.argmax(dim=1)
             correct += (pred == y).sum().item()
 
         train_loss = total_loss / total
         train_acc = correct / total
 
-        # TEST
+        # -----------------------
+        # TEST (без margin)
+        # -----------------------
         model.eval()
         head.eval()
+
         t_total = 0
         t_correct = 0
+
         with torch.no_grad():
             for x, y in test_loader:
                 x = x.to(device)
                 y = y.to(device)
+
                 emb = model(x)
                 cosine = head(emb)
-                logits = arcface_logits_stable(cosine, y, num_classes=C, m=MARGIN_M, s=SCALE_S)
-                pred = logits.argmax(dim=1)
+
+                logits_eval = cosine * SCALE_S
+                pred = logits_eval.argmax(dim=1)
+
                 t_total += x.size(0)
                 t_correct += (pred == y).sum().item()
+
         test_acc = t_correct / t_total
 
-        print(f"epoch {ep:02d}/{EPOCHS} | train_loss={train_loss:.4f} | train_acc={train_acc*100:.2f}% | test_acc={test_acc*100:.2f}%")
+        print(
+            f"epoch {ep:02d}/{EPOCHS} | "
+            f"train_loss={train_loss:.4f} | "
+            f"train_acc={train_acc*100:.2f}% | "
+            f"test_acc={test_acc*100:.2f}%"
+        )
 
     # -----------------------
     # t-SNE on TEST embeddings
@@ -251,13 +280,20 @@ def main():
     test_embs, test_labs = collect_test_embeddings(model, test_loader, device)
     print("test_embs:", test_embs.shape)
 
-    tsne = TSNE(n_components=2, perplexity=30, init="pca", learning_rate="auto", random_state=SEED)
+    tsne = TSNE(
+        n_components=2,
+        perplexity=30,
+        init="pca",
+        learning_rate="auto",
+        random_state=SEED
+    )
     xy = tsne.fit_transform(test_embs)
 
     plt.figure(figsize=(10, 8))
     for c in range(C):
         idx = (test_labs == c)
         plt.scatter(xy[idx, 0], xy[idx, 1], s=6, label=class_names[c])
+
     plt.legend(markerscale=3, fontsize=8)
     plt.title("EuroSAT test embeddings (t-SNE)")
     plt.tight_layout()
@@ -270,26 +306,46 @@ def main():
     # -----------------------
     cls_idx = build_class_index(test_ds)
 
-    # SAME
+    # SAME (один класс)
     c = random.randrange(C)
+    if len(cls_idx[c]) < 2:
+        # редкий случай, но на всякий
+        for cc in range(C):
+            if len(cls_idx.get(cc, [])) >= 2:
+                c = cc
+                break
+
     i1, i2 = random.sample(cls_idx[c], 2)
     img1, _ = test_ds[i1]
     img2, _ = test_ds[i2]
+
     e1 = embed_one(model, img1, device)
     e2 = embed_one(model, img2, device)
     d_same = cosine_distance(e1, e2)
-    save_pair(img1, img2, f"SAME {class_names[c]} | cosine_dist={d_same:.4f}", SAVE_SAME)
 
-    # DIFF
+    save_pair(
+        img1, img2,
+        f"SAME {class_names[c]} | cosine_dist={d_same:.4f}",
+        SAVE_SAME
+    )
+
+    # DIFF (разные классы)
     c1, c2 = random.sample(range(C), 2)
     i1 = random.choice(cls_idx[c1])
     i2 = random.choice(cls_idx[c2])
+
     img1, _ = test_ds[i1]
     img2, _ = test_ds[i2]
+
     e1 = embed_one(model, img1, device)
     e2 = embed_one(model, img2, device)
     d_diff = cosine_distance(e1, e2)
-    save_pair(img1, img2, f"DIFF {class_names[c1]} vs {class_names[c2]} | cosine_dist={d_diff:.4f}", SAVE_DIFF)
+
+    save_pair(
+        img1, img2,
+        f"DIFF {class_names[c1]} vs {class_names[c2]} | cosine_dist={d_diff:.4f}",
+        SAVE_DIFF
+    )
 
 
 if __name__ == "__main__":
