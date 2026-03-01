@@ -1,22 +1,27 @@
+import os
 import copy, random
 import numpy as np
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Subset
 from torchvision import datasets, transforms, models
+
 from sklearn.model_selection import train_test_split
 from sklearn.manifold import TSNE
 import matplotlib.pyplot as plt
 from PIL import Image
 
-# ===============================
-# 1) НАСТРОЙКИ
-# ===============================
-DATA_DIR = "/Users/xxx/Desktop/Учеба/Python/Pac/4_semestr/3_Lab/EuroSAT_RGB"
+# ============================================================
+# БЛОК 1. НАСТРОЙКИ ЭКСПЕРИМЕНТА
+# ============================================================
+DATA_DIR = "/home/alex/PycharmProjects/PAC/4_semestr/3_Lab/EuroSAT/2750"
+OUT_DIR = "./out_vis"
+os.makedirs(OUT_DIR, exist_ok=True)
 
 BATCH_SIZE = 64
-EPOCHS = 15
+EPOCHS = 5
 EMB_DIM = 256
 LR = 3e-4
 WEIGHT_DECAY = 1e-4
@@ -32,10 +37,12 @@ NUM_WORKERS = 2
 
 SHOW_PAIRS = 8
 
+TSNE_MAX_POINTS = 3000  # чтобы t-SNE не тормозил на огромном test
 
-# ===============================
-# 2) УТИЛИТЫ
-# ===============================
+
+# ============================================================
+# БЛОК 2. УТИЛИТЫ: устройство, сиды, трансформации
+# ============================================================
 def pick_device():
     if torch.cuda.is_available(): return "cuda"
     if torch.backends.mps.is_available(): return "mps"
@@ -45,10 +52,10 @@ def seed_all(seed: int):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 def get_tfm():
-    # картинки уже 64x64 -> Resize не делаем
     return transforms.Compose([
         transforms.ToTensor(),
         transforms.Normalize([0.485, 0.456, 0.406],
@@ -56,9 +63,9 @@ def get_tfm():
     ])
 
 
-# ===============================
-# 3) ОЦЕНКА ТОЧНОСТИ
-# ===============================
+# ============================================================
+# БЛОК 3. ОЦЕНКА ТОЧНОСТИ (accuracy) НА VAL/TEST
+# ============================================================
 @torch.no_grad()
 def eval_acc(loader, net, device):
     net.eval()
@@ -74,32 +81,34 @@ def eval_acc(loader, net, device):
     return correct / total
 
 
-# ===============================
-# 4) ARC-FACE LOGITS (стабильно)
-# ===============================
+# ============================================================
+# БЛОК 4. ArcFace: cosine -> cos(theta+m) для true класса
+# ============================================================
 def arcface_logits_stable(cosine, y, m, s):
-    cosine = cosine.clamp(-1 + 1e-7, 1 - 1e-7)  # важно для стабильности
+    cosine = cosine.clamp(-1 + 1e-7, 1 - 1e-7)
+
     cos_m = float(np.cos(m))
     sin_m = float(np.sin(m))
+
     sine = torch.sqrt(torch.clamp(1.0 - cosine * cosine, min=1e-7))
-    phi = cosine * cos_m - sine * sin_m          # cos(theta+m)
+    phi = cosine * cos_m - sine * sin_m
 
     logits = cosine.clone()
     idx = torch.arange(cosine.size(0), device=cosine.device)
-    logits[idx, y] = phi[idx, y]                 # маржа только для true класса
+    logits[idx, y] = phi[idx, y]
     return logits * s
 
 
-# ===============================
-# 5) МОДЕЛЬ: ResNet18 -> embedding -> cosine logits
-# ===============================
+# ============================================================
+# БЛОК 5. МОДЕЛЬ: ResNet18 -> embedding -> cosine logits
+# ============================================================
 class ArcFaceNet(nn.Module):
     def __init__(self, emb_dim, num_classes, pretrained=True):
         super().__init__()
+
         weights = models.ResNet18_Weights.IMAGENET1K_V1 if pretrained else None
         net = models.resnet18(weights=weights)
 
-        # под 64x64 уменьшаем раннее даунсемплирование
         net.conv1.stride = (1, 1)
         net.maxpool = nn.Identity()
 
@@ -108,6 +117,7 @@ class ArcFaceNet(nn.Module):
         self.backbone = net
 
         self.fc = nn.Linear(in_feats, emb_dim)
+
         self.W = nn.Parameter(torch.empty(emb_dim, num_classes))
         nn.init.kaiming_uniform_(self.W, a=np.sqrt(5))
 
@@ -120,9 +130,9 @@ class ArcFaceNet(nn.Module):
         return emb @ F.normalize(self.W, dim=0)
 
 
-# ===============================
-# 6) ЭМБЕДДИНГИ ДЛЯ t-SNE
-# ===============================
+# ============================================================
+# БЛОК 6. t-SNE: собираем embeddings и сохраняем PNG (без show)
+# ============================================================
 @torch.no_grad()
 def collect_embeddings(loader, net, device):
     net.eval()
@@ -133,42 +143,50 @@ def collect_embeddings(loader, net, device):
         ys.append(y.numpy())
     return np.concatenate(embs, 0), np.concatenate(ys, 0)
 
-def plot_tsne(embs, ys, class_names, title="t-SNE (test)"):
-    z = TSNE(n_components=2, init="pca", learning_rate="auto",
-             perplexity=30, random_state=SEED).fit_transform(embs)
+def plot_tsne_save(embs, ys, class_names, title, save_path):
+    z = TSNE(
+        n_components=2,
+        init="pca",
+        learning_rate="auto",
+        perplexity=30,
+        random_state=SEED
+    ).fit_transform(embs)
 
     plt.figure(figsize=(8, 6))
     for c, name in enumerate(class_names):
         m = (ys == c)
         plt.scatter(z[m, 0], z[m, 1], s=8, alpha=0.7, label=name)
+
     plt.title(title)
     plt.legend(markerscale=2, fontsize=8, ncol=2)
     plt.tight_layout()
-    plt.show()
+    plt.savefig(save_path, dpi=200)
+    plt.close()
 
 
-# ===============================
-# 7) INFERENCE: пары + distance
-# ===============================
-def visualize_pairs(net, base_ds, subset_indices, tfm, device, class_names, num_pairs=8):
+# ============================================================
+# БЛОК 7. INFERENCE: пары + distance -> сохраняем PNG (без show)
+# ============================================================
+def visualize_pairs_save(net, base_ds, subset_indices, tfm, device, class_names, num_pairs, save_path):
     by_class = {}
     for idx in subset_indices:
         y = base_ds.targets[idx]
         by_class.setdefault(y, []).append(idx)
 
-    classes = list(by_class.keys())
+    classes = [c for c in by_class.keys() if len(by_class[c]) >= 2]
+    if len(classes) < 2:
+        print("Not enough samples/classes for pairs.")
+        return
 
     pairs = []
     n_same = num_pairs // 2
     n_diff = num_pairs - n_same
 
-    # same-class
     for _ in range(n_same):
         c = random.choice(classes)
         i1, i2 = random.sample(by_class[c], 2)
         pairs.append((i1, i2, 1))
 
-    # diff-class
     for _ in range(n_diff):
         c1, c2 = random.sample(classes, 2)
         i1 = random.choice(by_class[c1])
@@ -188,6 +206,7 @@ def visualize_pairs(net, base_ds, subset_indices, tfm, device, class_names, num_
 
         x1 = tfm(im1).unsqueeze(0).to(device)
         x2 = tfm(im2).unsqueeze(0).to(device)
+
         with torch.no_grad():
             e1 = net.embed(x1)
             e2 = net.embed(x2)
@@ -202,12 +221,13 @@ def visualize_pairs(net, base_ds, subset_indices, tfm, device, class_names, num_
         ax2.set_title(f"B: {class_names[y2]}\ntrue_same={true_same} | L2 dist={dist:.4f}")
 
     plt.tight_layout()
-    plt.show()
+    plt.savefig(save_path, dpi=200)
+    plt.close()
 
 
-# ===============================
-# 8) MAIN
-# ===============================
+# ============================================================
+# БЛОК 8. MAIN
+# ============================================================
 def main():
     seed_all(SEED)
     device = pick_device()
@@ -231,9 +251,12 @@ def main():
     test_ds  = Subset(ds, test_idx.tolist())
 
     g = torch.Generator().manual_seed(SEED)
-    train_loader = DataLoader(train_ds, BATCH_SIZE, shuffle=True,  num_workers=NUM_WORKERS, generator=g)
-    val_loader   = DataLoader(val_ds,   BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS)
-    test_loader  = DataLoader(test_ds,  BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS)
+    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True,
+                              num_workers=NUM_WORKERS, generator=g)
+    val_loader   = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False,
+                              num_workers=NUM_WORKERS)
+    test_loader  = DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False,
+                              num_workers=NUM_WORKERS)
 
     net = ArcFaceNet(EMB_DIM, C, pretrained=True).to(device)
     opt = torch.optim.AdamW(net.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
@@ -252,6 +275,7 @@ def main():
 
             emb = net.embed(x)
             cosine = net.cosine_logits(emb)
+
             logits_arc = arcface_logits_stable(cosine, y, MARGIN_M, SCALE_S)
             loss = F.cross_entropy(logits_arc, y)
 
@@ -262,6 +286,7 @@ def main():
 
             total_loss += loss.item() * x.size(0)
             total += x.size(0)
+
             pred = (cosine * SCALE_S).argmax(1)
             correct += (pred == y).sum().item()
 
@@ -279,10 +304,24 @@ def main():
     test_acc = eval_acc(test_loader, net, device)
     print(f"\nBEST val={best_val*100:.2f}% | FINAL test={test_acc*100:.2f}%")
 
+    # ---- t-SNE (save only)
     test_embs, test_ys = collect_embeddings(test_loader, net, device)
-    plot_tsne(test_embs, test_ys, ds.classes, title="EuroSAT ArcFace embeddings (t-SNE, test)")
+    if test_embs.shape[0] > TSNE_MAX_POINTS:
+        rng = np.random.default_rng(SEED)
+        sel = rng.choice(test_embs.shape[0], size=TSNE_MAX_POINTS, replace=False)
+        test_embs = test_embs[sel]
+        test_ys = test_ys[sel]
 
-    visualize_pairs(net, ds, test_idx.tolist(), ds.transform, device, ds.classes, num_pairs=SHOW_PAIRS)
+    tsne_path = os.path.join(OUT_DIR, "tsne_test.png")
+    plot_tsne_save(test_embs, test_ys, ds.classes, "EuroSAT ArcFace embeddings (t-SNE, test)", tsne_path)
+
+    # ---- pairs (save only)
+    pairs_path = os.path.join(OUT_DIR, "pairs_distance.png")
+    visualize_pairs_save(net, ds, test_idx.tolist(), ds.transform, device, ds.classes, SHOW_PAIRS, pairs_path)
+
+    print(f"\nSaved: {tsne_path}")
+    print(f"Saved: {pairs_path}")
+
 
 if __name__ == "__main__":
     main()
