@@ -1,6 +1,5 @@
 import os
 import numpy as np
-
 import imageio.v2 as imageio
 
 import tensorflow as tf
@@ -9,16 +8,18 @@ from tensorflow.keras.layers import Input, Lambda, Dense, Dropout, Conv2D, MaxPo
 from tensorflow.keras.models import Sequential, Model
 from tensorflow.keras.optimizers import RMSprop
 
-
-
-DATA_DIR = "/home/alex/PycharmProjects/PAC/4_semestr/2_Lab/orl_faces"
+# -----------------------
+# Конфиг эксперимента
+# -----------------------
+DATA_DIR = "/Users/xxx/Desktop/Учеба/Python/Pac/4_semestr/2_Lab/orl_faces"
 SEED = 42
 
-# split by persons: 30 train, 5 val, 5 test
-N_TRAIN_PERSONS = 30
-N_VAL_PERSONS = 5
-N_TEST_PERSONS = 5
+# Деление по людям (без утечки): train/val/test содержат разные личности
+N_TRAIN_PERSONS = 20
+N_VAL_PERSONS = 10
+N_TEST_PERSONS = 10
 
+# Сколько положительных пар генерируем на одного человека
 TOTAL_POS_PER_PERSON = 250
 
 BATCH_SIZE = 128
@@ -28,28 +29,26 @@ MARGIN = 1.0
 
 
 # -----------------------
-# Load ORL images once
+# Загружаем ORL один раз: (40 людей × 10 фото × H × W)
 # -----------------------
 def load_orl_images(data_dir: str) -> np.ndarray:
-    """
-    Output: imgs (40, 10, H, W) uint8
-    """
     imgs = []
-    for person in range(1, 41):
+    for person in range(1, 41):       # папки s1..s40
         row = []
-        for idx in range(1, 11):
+        for idx in range(1, 11):      # файлы 1..10.pgm
             path = os.path.join(data_dir, f"s{person}", f"{idx}.pgm")
-            img = imageio.imread(path)  # (H,W) uint8
+            img = imageio.imread(path)  # (H, W) uint8
             row.append(img)
         imgs.append(row)
     return np.array(imgs, dtype=np.uint8)
 
 
 # -----------------------
-# Make pairs from a given set of persons (no leakage)
+# Генерация пар только внутри заданных person_ids (чтобы не было утечки)
+# X: (N, 2, H, W, 1) — пары изображений
+# Y: (N, 1) — метка: 1 = один человек, 0 = разные
 # -----------------------
 def make_pairs_from_persons(imgs: np.ndarray, person_ids, total_pos_per_person: int, seed: int):
-
     rng = np.random.default_rng(seed)
 
     person_ids = np.array(person_ids, dtype=np.int32)
@@ -58,13 +57,13 @@ def make_pairs_from_persons(imgs: np.ndarray, person_ids, total_pos_per_person: 
     H, W = imgs.shape[2], imgs.shape[3]
 
     total_pos = n_persons * total_pos_per_person
-    total_neg = total_pos
+    total_neg = total_pos  # балансируем классы: POS = NEG
     total = total_pos + total_neg
 
     X = np.empty((total, 2, H, W, 1), dtype=np.uint8)
     Y = np.empty((total, 1), dtype=np.float32)
 
-    # POS (same person)
+    # POS: два разных снимка одного и того же человека
     k = 0
     for pid in person_ids:
         for _ in range(total_pos_per_person):
@@ -74,7 +73,7 @@ def make_pairs_from_persons(imgs: np.ndarray, person_ids, total_pos_per_person: 
             Y[k, 0] = 1.0
             k += 1
 
-    # NEG (different persons, inside person_ids)
+    # NEG: снимки двух разных людей
     for _ in range(total_neg):
         p1, p2 = rng.choice(person_ids, size=2, replace=False)
         a = rng.integers(0, n_imgs)
@@ -84,7 +83,7 @@ def make_pairs_from_persons(imgs: np.ndarray, person_ids, total_pos_per_person: 
         Y[k, 0] = 0.0
         k += 1
 
-    # shuffle + normalize
+    # Перемешивание + нормализация пикселей в [0, 1]
     idx = rng.permutation(total)
     X = X[idx].astype(np.float32) / 255.0
     Y = Y[idx]
@@ -92,13 +91,14 @@ def make_pairs_from_persons(imgs: np.ndarray, person_ids, total_pos_per_person: 
 
 
 # -----------------------
-# Model: base CNN (shared)
+# Базовая CNN: превращает изображение в embedding (вектор признаков)
+# Общая для обеих веток (shared weights)
 # -----------------------
 def build_base_network(input_shape):
     return Sequential([
         Input(shape=input_shape),
 
-        Conv2D(6, (3, 3), activation="relu", padding="valid"),
+        Conv2D(6, (3, 3), activation="relu", padding="same"),
         MaxPooling2D((2, 2)),
         Dropout(0.25),
 
@@ -109,15 +109,19 @@ def build_base_network(input_shape):
         Flatten(),
         Dense(128, activation="relu"),
         Dropout(0.1),
-        Dense(50, activation="relu"),  # можно улучшить: без relu + L2-норм
+        Dense(50, activation="relu"),
     ])
 
 
+# Евклидова дистанция между двумя embedding (чем меньше, тем больше сходство)
 def euclidean_distance(vects):
     x, y = vects
     return K.sqrt(K.maximum(K.sum(K.square(x - y), axis=1, keepdims=True), K.epsilon()))
 
 
+# Contrastive loss:
+# POS (y=1): тянем distance -> 0
+# NEG (y=0): раздвигаем distance >= margin
 def contrastive_loss(margin=1.0):
     def loss(y_true, y_pred):
         return K.mean(
@@ -127,11 +131,13 @@ def contrastive_loss(margin=1.0):
     return loss
 
 
+# Точность по порогу: distance < threshold => "один человек"
 def compute_accuracy(distances, labels, threshold=0.5):
     preds_same = (distances.ravel() < threshold).astype(np.float32)
     return float(np.mean(preds_same == labels.ravel()))
 
 
+# Подбор лучшего порога по VAL (чтобы не подгонять threshold по TEST)
 def find_best_threshold(distances, labels):
     d = distances.ravel()
     candidates = np.quantile(d, np.linspace(0.01, 0.99, 99))
@@ -144,25 +150,28 @@ def find_best_threshold(distances, labels):
 
 
 def main():
+    # Фиксируем сиды для воспроизводимости
     np.random.seed(SEED)
     tf.random.set_seed(SEED)
 
-    imgs = load_orl_images(DATA_DIR)  # (40,10,H,W)
+    # Загружаем все изображения
+    imgs = load_orl_images(DATA_DIR)  # (40, 10, H, W)
 
-    # split persons (0..39)
+    # Делим людей на train/val/test (разные люди -> без утечки)
     rng = np.random.default_rng(SEED)
     persons = np.arange(40, dtype=np.int32)
     rng.shuffle(persons)
 
     train_persons = persons[:N_TRAIN_PERSONS]
     val_persons = persons[N_TRAIN_PERSONS:N_TRAIN_PERSONS + N_VAL_PERSONS]
-    test_persons = persons[N_TRAIN_PERSONS + N_VAL_PERSONS:N_TRAIN_PERSONS + N_VAL_PERSONS + N_TEST_PERSONS]
+    test_persons = persons[N_TRAIN_PERSONS + N_VAL_PERSONS:
+                           N_TRAIN_PERSONS + N_VAL_PERSONS + N_TEST_PERSONS]
 
     print("train persons:", train_persons)
     print("val persons  :", val_persons)
     print("test persons :", test_persons)
 
-    # pairs (no leakage)
+    # Генерируем пары отдельно для train/val/test (без пересечений людей)
     X_train, Y_train = make_pairs_from_persons(imgs, train_persons, TOTAL_POS_PER_PERSON, seed=SEED)
     X_val, Y_val = make_pairs_from_persons(imgs, val_persons, TOTAL_POS_PER_PERSON, seed=SEED + 1)
     X_test, Y_test = make_pairs_from_persons(imgs, test_persons, TOTAL_POS_PER_PERSON, seed=SEED + 2)
@@ -173,6 +182,7 @@ def main():
 
     input_dim = X_train.shape[2:]  # (H, W, 1)
 
+    # Siamese: два входа -> общий base_network -> два embedding -> дистанция
     img_a = Input(shape=input_dim)
     img_b = Input(shape=input_dim)
 
@@ -182,8 +192,12 @@ def main():
 
     dist = Lambda(euclidean_distance)([feat_a, feat_b])
 
+    # Обучаем модель минимизировать contrastive loss
     model = Model([img_a, img_b], dist)
-    model.compile(optimizer=RMSprop(learning_rate=LR), loss=contrastive_loss(margin=MARGIN))
+    model.compile(
+        optimizer=RMSprop(learning_rate=LR),
+        loss=contrastive_loss(margin=MARGIN)
+    )
 
     model.fit(
         [X_train[:, 0], X_train[:, 1]],
@@ -194,24 +208,18 @@ def main():
         verbose=2
     )
 
-    # pick threshold on VAL (unseen persons)
+    # Порог подбираем по VAL, затем финально оцениваем на TEST
     pred_val = model.predict([X_val[:, 0], X_val[:, 1]], verbose=0)
     best_t, best_acc_val = find_best_threshold(pred_val, Y_val)
+    print("\nVAL лучший порог:", best_t, "VAL точность:", best_acc_val)
 
-    print("\nVAL best threshold:", best_t, "VAL best acc:", best_acc_val)
-
-    # test (final)
     pred_test = model.predict([X_test[:, 0], X_test[:, 1]], verbose=0)
     acc_05 = compute_accuracy(pred_test, Y_test, threshold=0.5)
     acc_best = compute_accuracy(pred_test, Y_test, threshold=best_t)
 
-    print("\nTEST acc (threshold=0.5):", acc_05)
-    print("TEST acc (threshold=best_t from VAL):", acc_best)
-    print(set(train_persons) & set(val_persons))
-    print(set(train_persons) & set(test_persons))
-    print(set(val_persons) & set(test_persons))
+    print("\nTEST точность (порог=0.5):", acc_05)
+    print("TEST точность (порог=best_t из VAL):", acc_best)
 
 
 if __name__ == "__main__":
-
     main()
