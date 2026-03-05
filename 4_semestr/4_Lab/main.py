@@ -43,11 +43,14 @@ seed_all(SEED)
 
 
 # ---------- DATA ----------
-tfm = transforms.ToTensor()
-trainset = datasets.FashionMNIST(DATA_DIR, train=True, download=True, transform=tfm)
-testset  = datasets.FashionMNIST(DATA_DIR, train=False, download=True, transform=tfm)
-train_loader = DataLoader(trainset, batch_size=BATCH, shuffle=True, num_workers=2, pin_memory=PIN)
-test_loader  = DataLoader(testset,  batch_size=BATCH, shuffle=False, num_workers=2, pin_memory=PIN)
+def make_loaders():
+    tfm = transforms.ToTensor()
+    trainset = datasets.FashionMNIST(DATA_DIR, train=True, download=True, transform=tfm)
+    testset  = datasets.FashionMNIST(DATA_DIR, train=False, download=True, transform=tfm)
+
+    train_loader = DataLoader(trainset, batch_size=BATCH, shuffle=True, num_workers=2, pin_memory=PIN)
+    test_loader  = DataLoader(testset,  batch_size=BATCH, shuffle=False, num_workers=2, pin_memory=PIN)
+    return train_loader, test_loader
 
 
 # ---------- MODELS ----------
@@ -157,7 +160,7 @@ def save_latent_pca(model, loader, path, max_points=3000, title="latent PCA"):
     plt.savefig(path, dpi=160)
     plt.close()
 
-def train(model, out_prefix, epochs=30, noise_std=0.0):
+def train(model, out_prefix, train_loader, test_loader, epochs=30, noise_std=0.0):
     model = model.to(DEVICE)
     opt = optim.Adam(model.parameters(), lr=LR)
     loss_fn = nn.MSELoss()
@@ -191,8 +194,12 @@ def train(model, out_prefix, epochs=30, noise_std=0.0):
 
 
 # ---------- RUN ----------
-fc = train(FCAE(LATENT), f"fc_ae_lat{LATENT}", epochs=EPOCHS, noise_std=0.0)
-cae = train(ConvAE(LATENT), f"conv_ae_lat{LATENT}", epochs=EPOCHS, noise_std=0.0)
+def main():
+    train_loader, test_loader = make_loaders()
+    fc  = train(FCAE(LATENT),  f"fc_ae_lat{LATENT}",  train_loader, test_loader, epochs=EPOCHS, noise_std=0.0)
+    cae = train(ConvAE(LATENT), f"conv_ae_lat{LATENT}", train_loader, test_loader, epochs=EPOCHS, noise_std=0.0)
+    print("done ->", OUT_DIR)
 
-print("done ->", OUT_DIR)
-
+if __name__ == "__main__":
+    torch.multiprocessing.freeze_support()
+    main()
