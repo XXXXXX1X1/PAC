@@ -1,4 +1,3 @@
-import os
 import re
 import random
 from pathlib import Path
@@ -10,7 +9,8 @@ import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.checkpoint import checkpoint
+
+
 from torch.utils.data import Dataset, DataLoader
 
 # =======================
@@ -26,7 +26,8 @@ WEIGHTS_DIR.mkdir(exist_ok=True)
 SG_WEIGHTS = WEIGHTS_DIR / "skipgram_weights.pt"
 CBOW_WEIGHTS = WEIGHTS_DIR / "cbow_weights.pt"
 
-WINDOW = 2
+
+WINDOW = 3
 WINDOW_CBOW = 2
 MAX_VOCAB = 200000
 MIN_COUNT = 2
@@ -35,9 +36,10 @@ BATCH_SIZE = 1024
 EPOCHS_SG = 10
 EPOCHS_CBOW = 10
 K_NEG = 5
+LR = 2e-3
 
-SG_MODE = True
-CBOW_MODE = True
+SG_MODE = False
+CBOW_MODE = False
 
 
 # =======================
@@ -214,22 +216,18 @@ class SkipGramNegSampling(nn.Module):
         return -(positive_loss + negative_loss).mean()
 
 
-
-
-
-
 class CBOW(nn.Module):
     def __init__(self, vocab_size: int, embedding_dim: int):
         super().__init__()
 
-        self.word_embedding = nn.Embedding(vocab_size, embedding_dim)
+        self.word_embeddings = nn.Embedding(vocab_size, embedding_dim)
         self.output_layer = nn.Linear(embedding_dim, vocab_size)
 
     def forward(self, context_word_ids):
-        context_embeddings = self.word_embedding(context_word_ids)
+        context_embeddings = self.word_embeddings(context_word_ids)
         context_mean_vector = context_embeddings.mean(dim=1)
-        logist = self.output_layer(context_mean_vector)
-        return logist
+        logits = self.output_layer(context_mean_vector)
+        return logits
 
 # ======================
 # SAVE / LOAD
@@ -245,17 +243,17 @@ def save_skipgram(model, path, vocab, word2id, id2word, vocab_size, embedding_di
     }, path)
 
 def load_skipgram(path, device):
-    chechpoint = torch.load(path, map_location=device)
+    checkpoint = torch.load(path, map_location=device)
 
     model = SkipGramNegSampling(
-        chechpoint["vocab_size"],
-        chechpoint["embedding_dim"]
+        checkpoint["vocab_size"],
+        checkpoint["embedding_dim"]
     ).to(device)
 
-    model.load_state_dict(chechpoint["state_dict"])
+    model.load_state_dict(checkpoint["state_dict"])
     model.eval()
 
-    return model, chechpoint["vocab"], chechpoint["word2id"], chechpoint['id2word']
+    return model, checkpoint["vocab"], checkpoint["word2id"], checkpoint['id2word']
 
 def save_cbow(model, path, vocab, word2id, id2word, vocab_size, embedding_dim):
     torch.save(
@@ -269,6 +267,7 @@ def save_cbow(model, path, vocab, word2id, id2word, vocab_size, embedding_dim):
         }, path)
 
 def load_cbow(path, device):
+    checkpoint = torch.load(path, map_location=device)
     model = CBOW(
         checkpoint["vocab_size"],
         checkpoint["embedding_dim"]
@@ -279,6 +278,132 @@ def load_cbow(path, device):
 
     return model, checkpoint["vocab"], checkpoint["word2id"], checkpoint["id2word"]
 
+def train_skipgram(skipgram_dataloader, negative_probs_device, vocab_size, vocab, word2id, id2word):
+    if SG_MODE:
+        model = SkipGramNegSampling(vocab_size, EMBEDDING_DIM).to(device)
+        optimizer = torch.optim.Adam(model.parameters(), lr=LR)
+
+        for epoch in range(1, EPOCHS_SG + 1):
+            model.train()
+            total_loss = 0.0
+            steps = 0
+
+            for center_ids, positive_ids in skipgram_dataloader:
+                center_ids = center_ids.to(device).long()
+                positive_ids=positive_ids.to(device).long()
+
+                negative_ids = torch.multinomial(negative_probs_device,
+                                                 num_samples=center_ids.shape[0] * K_NEG,
+                                                 replacement=True
+                                                 ).view(center_ids.shape[0], K_NEG)
+                optimizer.zero_grad(set_to_none=True)
+
+                loss = model(center_ids, positive_ids, negative_ids)
+                loss.backward()
+                optimizer.step()
+
+                total_loss += float(loss.item())
+                steps += 1
+            epoch_loss = total_loss / steps if steps > 0 else 0.0
+            print(f"[SkipGram] epoch {epoch}/{EPOCHS_SG} | loss = {epoch_loss:.4f}")
+
+        save_skipgram(
+            model,
+            SG_WEIGHTS,
+            vocab,
+            word2id,
+            id2word,
+            vocab_size,
+            EMBEDDING_DIM
+        )
+    else:
+        model, vocab, word2id, id2word = load_skipgram(SG_WEIGHTS, device)
+        print("Веса загружены")
+
+    return model, vocab, word2id, id2word
+
+def train_cbow(cbow_dataloader, vocab_size, vocab, word2id, id2word):
+    if CBOW_MODE:
+        model = CBOW(vocab_size, EMBEDDING_DIM).to(device)
+        optimizer = torch.optim.Adam(model.parameters(), lr=LR)
+
+        for epoch in range(1, EPOCHS_SG + 1):
+            model.train()
+            totall_loss = 0.0
+            steps = 0
+
+            for context_ids, target_ids in cbow_dataloader:
+                context_ids = context_ids.to(device).long()
+                target_ids = target_ids.to(device).long()
+
+                optimizer.zero_grad(set_to_none=True)
+
+                logist = model(context_ids)
+                loss = F.cross_entropy(logist, target_ids)
+
+                loss.backward()
+                optimizer.step()
+
+                totall_loss += float(loss.item())
+                steps += 1
+            epoch_loss = totall_loss / steps if steps > 0 else 0
+            print(f"[CBOW] epoch {epoch}/{EPOCHS_CBOW} | loss = {epoch_loss: .4f}")
+
+        save_cbow(
+            model,
+            CBOW_WEIGHTS,
+            vocab,
+            word2id,
+            id2word,
+            vocab_size,
+            EMBEDDING_DIM
+        )
+    else:
+        model, vocab, word2id, id2word = load_cbow(CBOW_WEIGHTS, device)
+        print("Веса загружены")
+    return model, vocab, word2id, id2word
+
+def topk_cosine_torch(word, model, word2id, id2word, topk=5):
+    word = word.lower()
+
+    if word not in word2id:
+        return f"Слова '{word}' нет в словаре"
+
+    embeddings = model.in_embed.weight.detach()
+    embeddings = embeddings / (embeddings.norm(dim=1, keepdim=True) + 1e-12)
+
+    word_id = word2id[word]
+    word_vector = embeddings[word_id]
+
+    similarities = embeddings @ word_vector
+
+    similarities[word_id] = -1.0
+    if "<UNK>" in word2id:
+        similarities[word2id["<UNK>"]] = -1.0
+
+    best_ids = torch.topk(similarities, k=topk).indices.tolist()
+
+    result = []
+    for idx in best_ids:
+        result.append((id2word[idx], float(similarities[idx])))
+
+    return result
+
+def predict_cbow(context_words, cbow_model, word2id, id2word, topk=5):
+    context_ids = [word2id.get(word.lower(), word2id["<UNK>"]) for word in context_words]
+    x = torch.tensor([context_ids], dtype=torch.long, device=device)
+
+    cbow_model.eval()
+    with torch.no_grad():
+        logits = cbow_model(x)
+        probabilities = torch.softmax(logits, dim=1)
+        values, indices = torch.topk(probabilities, k=topk, dim=1)
+
+    result = []
+    for score, idx in zip(values[0].cpu().tolist(), indices[0].cpu().tolist()):
+        result.append((id2word[idx], float(score)))
+
+    return result
 def main():
     text = read_all_txt(DATA_FILE)
 
@@ -298,7 +423,98 @@ def main():
     print("Размер словаря: ", len(vocab))
     print("Топ 10 слов: ", counter.most_common(10))
 
+    unk_id = word2id["<UNK>"]
+
+    encoded_sentences = []
+    for sentence in tokenized_sentences:
+        encoded_sentence = [word2id.get(word, unk_id) for word in sentence]
+        encoded_sentences.append(encoded_sentence)
+    total_encoded_tokens = sum(len(sentence) for sentence in encoded_sentences)
+    unk_tokens = sum(1 for sentence in encoded_sentences for token_id in sentence if token_id == unk_id)
+
+    print(unk_tokens)
+
+    encoded_sentences_subsampled = subsample(encoded_sentences, t=1e-4)
+
+    skipgram_pairs = make_skipgram_pairs(encoded_sentences_subsampled, window=WINDOW)
+
+    skipgram_dataset = SkipGramPairDataset(skipgram_pairs)
+    skipgram_dataloader = DataLoader(
+        skipgram_dataset,
+        batch_size=BATCH_SIZE,
+        shuffle=True,
+        drop_last=False,
+        num_workers=0
+    )
+
+    vocab_size = len(vocab)
+
+    id_counts = torch.zeros(vocab_size, dtype=torch.float32)
+    for sentence in encoded_sentences:
+        for token_id in sentence:
+            id_counts[token_id] += 1
+
+    negative_weights = id_counts.pow(0.75)
+    negative_weights[unk_id] = 0.0
+    negative_probs = negative_weights / negative_weights.sum()
+    negative_probs_device = negative_probs.to(device)
 
 
+
+    min_cbow_length = 2 * WINDOW_CBOW + 1
+    cbow_sentences = [sentence for sentence in encoded_sentences if len(sentence) >= min_cbow_length]
+
+    cbow_dataset = CBOWDataset(cbow_sentences, window_size=WINDOW_CBOW)
+    cbow_dataloader = DataLoader(
+        cbow_dataset,
+        batch_size=BATCH_SIZE,
+        shuffle=True,
+        drop_last=False,
+        num_workers=0
+    )
+
+    skipgram_model, vocab, word2id, id2word = train_skipgram(
+        skipgram_dataloader,
+        negative_probs_device,
+        vocab_size,
+        vocab,
+        word2id,
+        id2word
+    )
+
+    print("\n=== Skip-gram похожие слова ===")
+
+    print("sam:")
+    print(topk_cosine_torch("sam", skipgram_model, word2id, id2word, topk=5))
+
+    print("\nfrodo:")
+    print(topk_cosine_torch("frodo", skipgram_model, word2id, id2word, topk=5))
+
+    print("\ngandalf:")
+    print(topk_cosine_torch("gandalf", skipgram_model, word2id, id2word, topk=5))
+
+    print("\nring:")
+    print(topk_cosine_torch("ring", skipgram_model, word2id, id2word, topk=5))
+
+    print("\nshire:")
+    print(topk_cosine_torch("shire", skipgram_model, word2id, id2word, topk=5))
+    cbow_model, vocab, word2id, id2word = train_cbow(
+        cbow_dataloader,
+        vocab_size,
+        vocab,
+        word2id,
+        id2word
+    )
+
+    print("\n=== CBOW предсказание слова по контексту ===")
+
+    print("\nContext: ['frodo', 'and', 'sam', 'went']")
+    print(predict_cbow(["frodo", "and", "sam", "went"], cbow_model, word2id, id2word, topk=5))
+
+    print("\nContext: ['the', 'one', 'ring', 'to']")
+    print(predict_cbow(["the", "one", "ring", "to"], cbow_model, word2id, id2word, topk=5))
+
+    print("\nContext: ['in', 'the', 'shire', 'lived']")
+    print(predict_cbow(["in", "the", "shire", "lived"], cbow_model, word2id, id2word, topk=5))
 if __name__ == "__main__":
     main()
