@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 from torch.utils.data import Dataset, DataLoader
 
 # =======================
@@ -256,14 +257,46 @@ def load_skipgram(path, device):
 
     return model, chechpoint["vocab"], chechpoint["word2id"], chechpoint['id2word']
 
+def save_cbow(model, path, vocab, word2id, id2word, vocab_size, embedding_dim):
+    torch.save(
+        {
+            "vocab_size": vocab_size,
+            "embedding_dim": embedding_dim,
+            "state_dict": model.state_dict(),
+            "vocab": vocab,
+            "word2id": word2id,
+            "id2word": id2word
+        }, path)
 
+def load_cbow(path, device):
+    model = CBOW(
+        checkpoint["vocab_size"],
+        checkpoint["embedding_dim"]
+    ).to(device)
 
+    model.load_state_dict(checkpoint["state_dict"])
+    model.eval()
+
+    return model, checkpoint["vocab"], checkpoint["word2id"], checkpoint["id2word"]
 
 def main():
     text = read_all_txt(DATA_FILE)
 
+    sentences = split_sentence(text)
+    print("Количество предложений:", len(sentences))
+
+    tokenized_sentences = [tokens for tokens in (tokenize(sentence) for sentence in sentences) if len(tokens) >= 2]
+    total_tokens = sum(len(sentence) for sentence in tokenized_sentences)
+    print("Количество токенов: ", total_tokens)
 
 
+    vocab, word2id, id2word, counter = build_vocab(
+        tokenized_sentences,
+        max_vocab=MAX_VOCAB,
+        min_count=MIN_COUNT
+    )
+    print("Размер словаря: ", len(vocab))
+    print("Топ 10 слов: ", counter.most_common(10))
 
 
 
